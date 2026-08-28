@@ -13,8 +13,8 @@ from jobmatch.sources import fetch_many, load_sources
 ROOT = Path(__file__).resolve().parent
 SOURCE_CONFIG = ROOT / "config" / "sources.yaml"
 
-st.set_page_config(page_title="JobMatch AI", page_icon="🎯", layout="wide")
-st.title("🎯 JobMatch AI")
+st.set_page_config(page_title="AI CV Job Matcher", page_icon="🎯", layout="wide")
+st.title("🎯 AI CV Job Matcher")
 st.caption("CV-to-job matching from selected official company career feeds")
 
 with st.expander("How the score works", expanded=False):

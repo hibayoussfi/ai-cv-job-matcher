@@ -1,4 +1,4 @@
-# JobMatch AI — Day 1
+# JobMatch AI 
 
 A local Streamlit tool that reads a CV, retrieves live vacancies from selected
 official company career feeds in Germany and Switzerland, ranks the vacancies,

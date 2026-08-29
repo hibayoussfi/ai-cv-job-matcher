@@ -10,7 +10,7 @@ import requests
 import yaml
 from bs4 import BeautifulSoup
 
-from .models import Job
+from .models import Job, SourceStatus
 
 
 USER_AGENT = "JobMatchAI/0.1 (personal portfolio project; public job feeds only)"
@@ -239,18 +239,50 @@ def fetch_source(source: dict[str, Any]) -> list[Job]:
 
 def fetch_many(sources: list[dict[str, Any]]) -> tuple[list[Job], list[str]]:
     """Fetch several independent public feeds concurrently."""
+    jobs, errors, _ = fetch_many_with_status(sources)
+    return jobs, errors
+
+
+def fetch_many_with_status(
+    sources: list[dict[str, Any]],
+) -> tuple[list[Job], list[str], list[SourceStatus]]:
+    """Fetch feeds and expose per-source coverage instead of hiding failures."""
+
     jobs: list[Job] = []
     errors: list[str] = []
+    statuses: dict[str, SourceStatus] = {}
     with ThreadPoolExecutor(max_workers=min(5, max(1, len(sources)))) as executor:
         future_map = {executor.submit(fetch_source, source): source for source in sources}
         for future in as_completed(future_map):
             source = future_map[future]
+            name = str(source.get("name", "Unknown source"))
+            provider = str(source.get("provider", "Unknown"))
             try:
-                jobs.extend(future.result())
+                source_jobs = future.result()
+                jobs.extend(source_jobs)
+                statuses[name] = SourceStatus(
+                    company=name,
+                    provider=provider,
+                    status="OK" if source_jobs else "No jobs returned",
+                    jobs_found=len(source_jobs),
+                )
             except SourceFetchError as exc:
                 errors.append(str(exc))
+                statuses[name] = SourceStatus(
+                    company=name,
+                    provider=provider,
+                    status="Failed",
+                    message=str(exc),
+                )
             except Exception as exc:  # defensive isolation between independent sources
-                errors.append(f"{source.get('name', 'Unknown source')}: {exc}")
+                message = f"{name}: {exc}"
+                errors.append(message)
+                statuses[name] = SourceStatus(
+                    company=name,
+                    provider=provider,
+                    status="Failed",
+                    message=message,
+                )
 
     # Some feeds occasionally publish duplicate localized entries.
     unique: dict[tuple[str, str, str], Job] = {}
@@ -261,4 +293,15 @@ def fetch_many(sources: list[dict[str, Any]]) -> tuple[list[Job], list[str]]:
             job.job_url,
         )
         unique[key] = job
-    return list(unique.values()), sorted(errors)
+    ordered_statuses = [
+        statuses.get(
+            str(source.get("name", "Unknown source")),
+            SourceStatus(
+                company=str(source.get("name", "Unknown source")),
+                provider=str(source.get("provider", "Unknown")),
+                status="Not attempted",
+            ),
+        )
+        for source in sources
+    ]
+    return list(unique.values()), sorted(errors), ordered_statuses

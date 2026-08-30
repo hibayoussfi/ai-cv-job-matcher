@@ -17,11 +17,11 @@ def test_professional_search_workspace_renders():
         "Work mode",
         "Seniority",
         "Job type",
-        "Official company sources",
     ]
     assert [button.label for button in app.button] == [
-        "Search and rank official jobs"
+        "Search and rank regional jobs"
     ]
+    assert "Target roles or skills" in [widget.label for widget in app.text_input]
     rendered_markdown = " ".join(element.value for element in app.markdown)
     assert "Find roles that fit your real technical strengths" in rendered_markdown
     assert "What happens next" in rendered_markdown

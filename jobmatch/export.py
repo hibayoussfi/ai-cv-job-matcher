@@ -35,9 +35,10 @@ RESULT_COLUMNS = [
     "Missing skills",
     "Why it matches",
     "Warnings",
-    "Official job URL",
+    "Job URL",
     "Apply URL",
     "Provider",
+    "Source type",
     "Published/updated",
     "Application status",
     "Application date",
@@ -105,9 +106,10 @@ def results_to_dataframe(
                 "Missing skills": ", ".join(result.missing_skills),
                 "Why it matches": " | ".join(result.reasons),
                 "Warnings": " | ".join(result.warnings),
-                "Official job URL": result.job.job_url,
+                "Job URL": result.job.job_url,
                 "Apply URL": result.job.apply_url or result.job.job_url,
                 "Provider": result.job.provider,
+                "Source type": result.job.source_type,
                 "Published/updated": result.job.published_at,
                 "Application status": record.get("status", "Not reviewed"),
                 "Application date": record.get("application_date", ""),
@@ -139,7 +141,7 @@ def _source_status_dataframe(statuses: list[SourceStatus]) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
-                "Company": status.company,
+                "Source": status.company,
                 "Provider": status.provider,
                 "Status": status.status,
                 "Jobs found": status.jobs_found,
@@ -147,7 +149,7 @@ def _source_status_dataframe(statuses: list[SourceStatus]) -> pd.DataFrame:
             }
             for status in statuses
         ],
-        columns=["Company", "Provider", "Status", "Jobs found", "Message"],
+        columns=["Source", "Provider", "Status", "Jobs found", "Message"],
     )
 
 
@@ -172,8 +174,8 @@ def _method_dataframe() -> pd.DataFrame:
             ),
             (
                 "Coverage boundary",
-                "Only configured, verified official career feeds are searched. The "
-                "Source Status sheet shows the actual coverage of this run.",
+                "Regional indexes and configured official career feeds are searched. "
+                "The Source Status sheet shows the actual coverage and failures.",
             ),
             (
                 "Important",
@@ -216,7 +218,7 @@ def _style_table_sheet(sheet, link_headers: tuple[str, ...] = ()) -> None:
         "Missing skills",
         "Why it matches",
         "Warnings",
-        "Official job URL",
+        "Job URL",
         "Apply URL",
         "Notes",
         "Message",
@@ -297,7 +299,7 @@ def build_excel(
         _method_dataframe().to_excel(writer, index=False, sheet_name="Scoring Method")
 
         for name in writer.book.sheetnames:
-            links = ("Official job URL", "Apply URL") if name in {
+            links = ("Job URL", "Apply URL") if name in {
                 "Top Matches",
                 "All Jobs",
                 "Application Tracker",

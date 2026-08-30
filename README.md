@@ -1,13 +1,17 @@
 # JobMatch AI
 
-A local Streamlit tool that reads a CV, retrieves live vacancies from selected
-official company career feeds in Germany and Switzerland, ranks the vacancies,
-and exports the results to a formatted Excel workbook.
+A Streamlit tool that reads a CV, retrieves live vacancies from regional indexes
+and verified company career feeds in Germany and Switzerland, ranks the
+vacancies, and exports the results to a formatted Excel workbook.
 
 ## What V1.1 does
 
 - Accepts text-based PDF, DOCX, and TXT CVs.
 - Reads public job feeds from Greenhouse, Lever, Ashby, Recruitee, and Personio.
+- Searches Germany's Federal Employment Agency vacancy index using the selected
+  cities and up to three target roles or skills.
+- Reads the public Arbeitnow ATS index to broaden employer coverage in the
+  selected market.
 - Starts with six official sources: Enpal, Climeworks, TWAICE, Voltfang,
   The Mobility House, and Entrix.
 - Builds a personal search profile with countries, preferred cities, work mode,
@@ -29,9 +33,9 @@ and exports the results to a formatted Excel workbook.
 
 ## What it does **not** do
 
-- It does not search every company in Germany and Switzerland. No single public
+- It cannot guarantee every company in Germany and Switzerland. No single public
   API provides every official vacancy, and many career systems expose no
-  permitted public feed.
+  permitted public feed. The app reports the sources actually queried.
 - It does not bypass website protections or scrape sites that prohibit it.
 - It does not apply automatically.
 - Its score is not a prediction that a company will interview or hire you.
@@ -40,9 +44,9 @@ and exports the results to a formatted Excel workbook.
 - Scanned PDFs need OCR, which is outside V1.1.
 
 That boundary is deliberate. Career systems differ substantially. The app uses
-verified public feeds and reports the status and job count of every source it
-actually queried. It does not describe partial coverage as a complete market
-search.
+regional indexes plus verified public feeds and reports the status and job count
+of every source it actually queried. Results are labeled as official company
+feeds, public employment index entries, or regional ATS index entries.
 
 ## Scoring
 
@@ -60,6 +64,8 @@ type remains visible instead of being treated as reliable data.
 
 ## Search-profile behavior
 
+- Target roles or skills drive regional discovery. If left blank, up to three
+  transferable skills are inferred from the CV.
 - Preferred countries are always hard filters.
 - With relocation enabled, preferred cities improve the location score.
 - Without relocation, preferred cities become hard filters for non-remote jobs.

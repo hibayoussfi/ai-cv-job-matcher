@@ -13,6 +13,7 @@ class Job:
     apply_url: str = ""
     source_name: str = ""
     provider: str = ""
+    source_type: str = "Official company feed"
     published_at: str = ""
 
 
@@ -32,7 +33,7 @@ class SearchProfile:
 
 @dataclass(frozen=True)
 class SourceStatus:
-    """Observable result of querying one official company source."""
+    """Observable result of querying one company feed or regional index."""
 
     company: str
     provider: str

@@ -42,6 +42,7 @@ def test_excel_contains_six_sheets_ranked_job_and_clickable_link():
     sheet = workbook["Top Matches"]
     assert sheet["B2"].value == 82.5
     assert sheet["V2"].hyperlink.target == "https://example.test/job"
+    assert sheet["Y2"].value == "Official company feed"
     assert workbook["Source Status"]["D2"].value == 1
     assert workbook["Scoring Method"]["B11"].value.startswith("Scores support human review")
 

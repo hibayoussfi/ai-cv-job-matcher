@@ -10,9 +10,9 @@ import streamlit as st
 
 from jobmatch.cv_parser import CVParseError, anonymize_cv_text, extract_cv_text
 from jobmatch.export import build_excel, results_to_dataframe
-from jobmatch.matching import COUNTRY_CITIES, job_matches_profile, rank_jobs
+from jobmatch.matching import COUNTRY_CITIES, extract_skills, job_matches_profile, rank_jobs
 from jobmatch.models import MatchResult, SearchProfile
-from jobmatch.sources import fetch_many_with_status, load_sources
+from jobmatch.sources import fetch_hybrid_with_status, load_sources
 
 
 ROOT = Path(__file__).resolve().parent
@@ -325,6 +325,7 @@ def _render_tags(result: MatchResult) -> None:
     band_label, band_class = _score_band(result.match_score)
     tags = [
         (band_label, f"jm-tag--{band_class}"),
+        (result.job.source_type, ""),
         (result.work_mode, ""),
         (result.seniority, ""),
         (result.job_type, ""),
@@ -384,7 +385,12 @@ def _render_job_card(
 
         apply_url = result.job.apply_url or result.job.job_url
         if apply_url:
-            apply_col.link_button("Open official role", apply_url, use_container_width=True)
+            link_label = (
+                "Open official role"
+                if result.job.source_type == "Official company feed"
+                else "Open source listing"
+            )
+            apply_col.link_button(link_label, apply_url, use_container_width=True)
         else:
             apply_col.button(
                 "Link unavailable",
@@ -447,13 +453,43 @@ def _render_job_card(
 
 
 sources = load_sources(SOURCE_CONFIG)
-source_by_name = {source["name"]: source for source in sources}
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_selected(source_names: tuple[str, ...]):
-    selected = [source_by_name[name] for name in source_names]
-    return fetch_many_with_status(selected)
+def _fetch_market(
+    countries: tuple[str, ...],
+    cities: tuple[str, ...],
+    search_terms: tuple[str, ...],
+    relocation_willing: bool,
+):
+    return fetch_hybrid_with_status(
+        sources,
+        countries,
+        cities,
+        search_terms,
+        relocation_willing,
+    )
+
+
+def _derive_search_terms(target_text: str, cv_text: str) -> tuple[str, ...]:
+    entered = tuple(
+        term.strip() for term in target_text.split(",") if term.strip()
+    )
+    if entered:
+        return entered[:3]
+    detected = extract_skills(cv_text)
+    priority = (
+        "Model-based development",
+        "Control systems",
+        "Systems engineering",
+        "Electrical engineering",
+        "BMS",
+        "Software development",
+        "Testing",
+        "Project management",
+    )
+    inferred = tuple(skill for skill in priority if skill in detected)
+    return inferred[:3] or ("Engineer",)
 
 
 if "application_records" not in st.session_state:
@@ -467,11 +503,11 @@ st.markdown(
         <div class="jm-eyebrow">Explainable CV-to-job matching</div>
         <h1>Find roles that fit your real technical strengths.</h1>
         <p>
-            Search verified company career feeds, compare requirements with your CV,
-            and turn the best opportunities into an application-ready Excel tracker.
+            Search broad regional indexes and verified company career feeds, compare
+            requirements with your CV, and build an application-ready Excel tracker.
         </p>
         <div class="jm-trust-row">
-            <span class="jm-trust-pill">Official career feeds</span>
+            <span class="jm-trust-pill">Region-first discovery</span>
             <span class="jm-trust-pill">Transparent scoring</span>
             <span class="jm-trust-pill">Privacy-aware processing</span>
         </div>
@@ -491,10 +527,10 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.markdown("#### Search coverage")
-    st.write(f"{len(sources)} verified company feeds")
+    st.write("Regional indexes + verified feeds")
     st.caption(
-        "This is transparent partial coverage, not every employer in Germany or "
-        "Switzerland."
+        f"Includes {len(sources)} direct company feeds. No public service exposes "
+        "every employer, so each result shows its source type."
     )
     st.divider()
     st.markdown("#### Privacy")
@@ -570,7 +606,15 @@ _section_header(
 )
 
 with st.container(border=True):
-    st.markdown("##### Location and working model")
+    st.markdown("##### Target and location")
+    target_text = st.text_input(
+        "Target roles or skills",
+        placeholder="Controls engineer, model-based development, BMS",
+        help=(
+            "Separate up to three search ideas with commas. Leave blank to infer "
+            "them from the CV."
+        ),
+    )
     country_col, city_col = st.columns(2, gap="large")
     with country_col:
         countries = st.multiselect(
@@ -647,14 +691,9 @@ with st.container(border=True):
                 help="Keep them with a warning instead of rejecting them.",
             )
 
-        selected_names = st.multiselect(
-            "Official company sources",
-            options=list(source_by_name),
-            default=list(source_by_name),
-        )
         st.caption(
-            "Every selected feed is reported in Source coverage after the search, "
-            "including failures and zero-result sources."
+            "Coverage is automatic: regional indexes plus verified direct company "
+            "feeds for the selected countries. Every source is reported after search."
         )
 
     selected_city_text = ", ".join(preferred_cities) or "any city"
@@ -669,7 +708,7 @@ with st.container(border=True):
         unsafe_allow_html=True,
     )
     scan = st.button(
-        "Search and rank official jobs",
+        "Search and rank regional jobs",
         type="primary",
         use_container_width=True,
     )
@@ -687,10 +726,6 @@ if scan:
     if not work_modes:
         st.error("Select at least one work mode.")
         st.stop()
-    if not selected_names:
-        st.error("Select at least one official company source.")
-        st.stop()
-
     cv_bytes = uploaded_cv.getvalue()
     try:
         cv_text = extract_cv_text(
@@ -706,6 +741,8 @@ if scan:
         names = tuple(part.strip() for part in names_to_remove.split(",") if part.strip())
         cv_text = anonymize_cv_text(cv_text, names=names)
 
+    search_terms = _derive_search_terms(target_text, cv_text)
+
     excluded_keywords = tuple(
         keyword.strip() for keyword in excluded_text.split(",") if keyword.strip()
     )
@@ -720,9 +757,15 @@ if scan:
         include_unknown_locations=include_unknown,
     )
 
-    with st.status("Searching verified company feeds…", expanded=True) as search_status:
-        st.write("Reading official vacancy feeds")
-        jobs, errors, source_statuses = _fetch_selected(tuple(selected_names))
+    with st.status("Searching the selected regional market…", expanded=True) as search_status:
+        st.write("Reading regional indexes and verified company feeds")
+        st.write("Search focus: " + ", ".join(search_terms))
+        jobs, errors, source_statuses = _fetch_market(
+            tuple(countries),
+            tuple(preferred_cities),
+            search_terms,
+            relocation_willing,
+        )
         st.write("Applying your location and role constraints")
         scoped_jobs = [job for job in jobs if job_matches_profile(job, profile)]
         st.write("Calculating explainable match scores")
@@ -751,9 +794,9 @@ if "results" not in st.session_state:
     st.markdown(
         """
         <div class="jm-inline-note" style="margin-top: 1.2rem;">
-            <strong>What happens next:</strong> the app retrieves fresh vacancies,
-            applies your hard filters, ranks the remaining roles, and explains every
-            score. It never applies on your behalf.
+            <strong>What happens next:</strong> the app searches regional indexes and
+            verified company feeds, applies your hard filters, ranks the remaining
+            roles, and explains every score. It never applies on your behalf.
         </div>
         """,
         unsafe_allow_html=True,
@@ -777,7 +820,7 @@ else:
     metric2.metric("After hard filters", scoped_jobs)
     metric3.metric("Above score threshold", len(results))
     metric4.metric(
-        "Sources healthy",
+            "Sources healthy",
         f"{sum(status.status != 'Failed' for status in source_statuses)}/{len(source_statuses)}",
     )
 
@@ -884,7 +927,7 @@ else:
             "Transferable matches",
             "Missing skills",
             "Application status",
-            "Official job URL",
+            "Job URL",
         ]
         st.dataframe(
             dataframe[display_columns],
@@ -898,21 +941,21 @@ else:
                     max_value=100,
                     format="%.1f",
                 ),
-                "Official job URL": st.column_config.LinkColumn("Official role"),
+                "Job URL": st.column_config.LinkColumn("Open listing"),
             },
         )
 
     with coverage_tab:
         healthy = sum(status.status != "Failed" for status in source_statuses)
         st.markdown(
-            f"**{healthy} of {len(source_statuses)} selected sources responded.** "
+            f"**{healthy} of {len(source_statuses)} queried sources responded.** "
             "A healthy source can still return zero roles."
         )
         st.dataframe(
             pd.DataFrame(
                 [
                     {
-                        "Company": status.company,
+                        "Source": status.company,
                         "Provider": status.provider,
                         "Status": status.status,
                         "Jobs found": status.jobs_found,

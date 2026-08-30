@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -15,6 +17,13 @@ from .models import Job, SourceStatus
 
 USER_AGENT = "JobMatchAI/0.1 (personal portfolio project; public job feeds only)"
 TIMEOUT_SECONDS = 20
+GERMAN_SEARCH_LOCATIONS = {
+    "Cologne": "Köln",
+    "Düsseldorf": "Düsseldorf",
+    "Hanover": "Hannover",
+    "Munich": "München",
+    "Nuremberg": "Nürnberg",
+}
 
 
 class SourceFetchError(RuntimeError):
@@ -47,14 +56,209 @@ def _dict_text(value: Any) -> str:
     return ""
 
 
-def _get_json(url: str) -> Any:
+def _get_json(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    request_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    request_headers.update(headers or {})
     response = requests.get(
         url,
+        params=params,
         timeout=TIMEOUT_SECONDS,
-        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        headers=request_headers,
     )
     response.raise_for_status()
     return response.json()
+
+
+def sources_for_countries(
+    sources: list[dict[str, Any]], countries: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """Keep configured feeds for the requested market; retain legacy untagged feeds."""
+
+    selected = set(countries)
+    return [
+        source
+        for source in sources
+        if not source.get("country") or source.get("country") in selected
+    ]
+
+
+def _timestamp_date(value: Any) -> str:
+    try:
+        return datetime.fromtimestamp(int(value), timezone.utc).date().isoformat()
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _fetch_arbeitnow(max_pages: int = 2) -> list[Job]:
+    """Read a broad ATS-backed European index without requiring an API key."""
+
+    jobs: list[Job] = []
+    for page in range(1, max_pages + 1):
+        payload = _get_json(
+            "https://www.arbeitnow.com/api/job-board-api",
+            params={"page": page},
+        )
+        for item in payload.get("data", []):
+            listing_url = item.get("url", "")
+            tags = " ".join(item.get("tags") or [])
+            job_types = " ".join(item.get("job_types") or [])
+            remote = "Remote" if item.get("remote") else ""
+            jobs.append(
+                Job(
+                    company=item.get("company_name", "Unknown employer"),
+                    title=item.get("title", "Untitled role"),
+                    location=" ".join(
+                        part for part in [item.get("location", ""), remote] if part
+                    ),
+                    description=" ".join(
+                        part
+                        for part in [
+                            _clean_html(item.get("description")),
+                            tags,
+                            job_types,
+                        ]
+                        if part
+                    ),
+                    job_url=listing_url,
+                    apply_url=listing_url,
+                    source_name="Arbeitnow ATS index",
+                    provider="Arbeitnow",
+                    source_type="Regional ATS index",
+                    published_at=_timestamp_date(item.get("created_at")),
+                )
+            )
+        if not (payload.get("links") or {}).get("next"):
+            break
+    return jobs
+
+
+def _location_text(locations: Any) -> str:
+    parts: list[str] = []
+    for location in locations or []:
+        address = location.get("adresse") or location
+        city = address.get("ort", "")
+        region = str(address.get("region", "")).replace("_", " ").title()
+        country = address.get("land", "")
+        if str(country).upper() == "DEUTSCHLAND":
+            country = "Germany"
+        rendered = ", ".join(part for part in [city, region, country] if part)
+        if rendered and rendered not in parts:
+            parts.append(rendered)
+    return " · ".join(parts)
+
+
+def _fetch_arbeitsagentur(
+    search_terms: tuple[str, ...],
+    locations: tuple[str, ...],
+    *,
+    max_jobs: int = 60,
+) -> list[Job]:
+    """Search the German public employment index and hydrate vacancy details."""
+
+    search_url = (
+        "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v6/jobs"
+    )
+    detail_url = (
+        "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobdetails/"
+    )
+    headers = {"X-API-Key": "jobboerse-jobsuche"}
+    localized_locations = tuple(
+        GERMAN_SEARCH_LOCATIONS.get(location, location) for location in locations
+    )
+    queries = [
+        (term, location)
+        for term in search_terms[:3]
+        for location in (localized_locations[:4] or ("Deutschland",))
+    ]
+    summaries: dict[str, dict[str, Any]] = {}
+    search_errors: list[Exception] = []
+
+    def search(query: tuple[str, str]) -> dict[str, Any]:
+        term, location = query
+        return _get_json(
+            search_url,
+            params={
+                "was": term,
+                "wo": location,
+                "angebotsart": 1,
+                "page": 1,
+                "size": 25,
+                "veroeffentlichtseit": 60,
+                "zeitarbeit": "false",
+                "pav": "false",
+            },
+            headers=headers,
+        )
+
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(queries)))) as executor:
+        futures = [executor.submit(search, query) for query in queries]
+        for future in as_completed(futures):
+            try:
+                payload = future.result()
+            except Exception as exc:  # one city/term must not erase other results
+                search_errors.append(exc)
+                continue
+            for item in payload.get("ergebnisliste", payload.get("stellenangebote", [])):
+                reference = item.get("referenznummer") or item.get("refnr")
+                if reference and reference not in summaries:
+                    summaries[reference] = item
+                if len(summaries) >= max_jobs:
+                    break
+
+    if not summaries and search_errors:
+        raise SourceFetchError(f"Federal Employment Agency index: {search_errors[0]}")
+
+    def hydrate(entry: tuple[str, dict[str, Any]]) -> Job:
+        reference, summary = entry
+        encoded = base64.b64encode(reference.encode("utf-8")).decode("ascii")
+        try:
+            detail = _get_json(detail_url + encoded, headers=headers)
+        except Exception:
+            detail = summary
+        external_url = (
+            detail.get("externeURL")
+            or detail.get("externeUrl")
+            or summary.get("externeURL")
+            or summary.get("externeUrl")
+        )
+        public_url = (
+            external_url
+            or f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{reference}"
+        )
+        locations_value = detail.get("stellenlokationen") or summary.get(
+            "stellenlokationen"
+        )
+        return Job(
+            company=detail.get("firma") or detail.get("arbeitgeber") or summary.get(
+                "firma", "Unknown employer"
+            ),
+            title=detail.get("stellenangebotsTitel")
+            or detail.get("titel")
+            or summary.get("stellenangebotsTitel", "Untitled role"),
+            location=_location_text(locations_value),
+            description=detail.get("stellenangebotsBeschreibung")
+            or detail.get("stellenbeschreibung")
+            or "",
+            job_url=public_url,
+            apply_url=public_url,
+            source_name="Federal Employment Agency index",
+            provider="Bundesagentur für Arbeit",
+            source_type="Public employment index",
+            published_at=detail.get("datumErsteVeroeffentlichung")
+            or summary.get("datumErsteVeroeffentlichung", ""),
+        )
+
+    jobs: list[Job] = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(hydrate, item) for item in list(summaries.items())]
+        for future in as_completed(futures):
+            jobs.append(future.result())
+    return jobs
 
 
 def _fetch_greenhouse(source: dict[str, Any]) -> list[Job]:
@@ -284,15 +488,6 @@ def fetch_many_with_status(
                     message=message,
                 )
 
-    # Some feeds occasionally publish duplicate localized entries.
-    unique: dict[tuple[str, str, str], Job] = {}
-    for job in jobs:
-        key = (
-            re.sub(r"\s+", " ", job.company.lower()).strip(),
-            re.sub(r"\s+", " ", job.title.lower()).strip(),
-            job.job_url,
-        )
-        unique[key] = job
     ordered_statuses = [
         statuses.get(
             str(source.get("name", "Unknown source")),
@@ -304,4 +499,93 @@ def fetch_many_with_status(
         )
         for source in sources
     ]
-    return list(unique.values()), sorted(errors), ordered_statuses
+    return _deduplicate_jobs(jobs), sorted(errors), ordered_statuses
+
+
+def _deduplicate_jobs(jobs: list[Job]) -> list[Job]:
+    """Prefer direct company feeds when the same vacancy appears in an index."""
+
+    priority = {
+        "Official company feed": 0,
+        "Public employment index": 1,
+        "Regional ATS index": 2,
+    }
+    unique: dict[tuple[str, str, str], Job] = {}
+    for job in sorted(jobs, key=lambda item: priority.get(item.source_type, 9)):
+        key = (
+            re.sub(r"\s+", " ", job.company.lower()).strip(),
+            re.sub(r"\s+", " ", job.title.lower()).strip(),
+            re.sub(r"\s+", " ", job.location.lower()).strip(),
+        )
+        unique.setdefault(key, job)
+    return list(unique.values())
+
+
+def fetch_hybrid_with_status(
+    sources: list[dict[str, Any]],
+    countries: tuple[str, ...],
+    cities: tuple[str, ...],
+    search_terms: tuple[str, ...],
+    relocation_willing: bool = True,
+) -> tuple[list[Job], list[str], list[SourceStatus]]:
+    """Combine verified feeds with broad indexes while isolating every failure."""
+
+    selected_sources = sources_for_countries(sources, countries)
+    jobs: list[Job] = []
+    errors: list[str] = []
+    statuses: list[SourceStatus] = []
+
+    tasks: dict[Any, tuple[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        official_future = executor.submit(fetch_many_with_status, selected_sources)
+        if set(countries) & {"Germany", "Switzerland"}:
+            tasks[executor.submit(_fetch_arbeitnow)] = (
+                "Arbeitnow ATS index",
+                "Regional ATS index",
+            )
+        if "Germany" in countries and search_terms:
+            federal_locations = cities
+            if relocation_willing and "Deutschland" not in federal_locations:
+                federal_locations = (*federal_locations, "Deutschland")
+            tasks[
+                executor.submit(
+                    _fetch_arbeitsagentur,
+                    search_terms,
+                    federal_locations,
+                )
+            ] = (
+                "Federal Employment Agency index",
+                "Public employment index",
+            )
+
+        official_jobs, official_errors, official_statuses = official_future.result()
+        jobs.extend(official_jobs)
+        errors.extend(official_errors)
+        statuses.extend(official_statuses)
+
+        for future in as_completed(tasks):
+            name, provider = tasks[future]
+            try:
+                source_jobs = future.result()
+                jobs.extend(source_jobs)
+                statuses.append(
+                    SourceStatus(
+                        company=name,
+                        provider=provider,
+                        status="OK" if source_jobs else "No jobs returned",
+                        jobs_found=len(source_jobs),
+                    )
+                )
+            except Exception as exc:
+                message = f"{name}: {exc}"
+                errors.append(message)
+                statuses.append(
+                    SourceStatus(
+                        company=name,
+                        provider=provider,
+                        status="Failed",
+                        message=message,
+                    )
+                )
+
+    return _deduplicate_jobs(jobs), sorted(errors), statuses

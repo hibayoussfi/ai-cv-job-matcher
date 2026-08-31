@@ -1,14 +1,12 @@
-.venv/
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.coverage
+.venv/
+venv/
 .env
-.streamlit/secrets.toml
-outputs/
-job_matches.xlsx
-
-# CVs contain personal data and must not be committed.
-*.pdf
-*.doc
-*.docx
+output/
+.cache/
+.pytest_cache/
+*.mp4
+*.mp3
+*.wav
+*.srt
